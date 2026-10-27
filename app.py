@@ -1,5 +1,6 @@
 import io
 import json
+import time
 import zipfile
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -20,22 +21,21 @@ st.write(
 )
 
 with st.sidebar:
-  st.header("🔑 Settings")
-  # Check if API key is stored in Streamlit Secrets, otherwise ask user
-  secret_key = (
-      st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
-  )
-  api_key = st.text_input(
-      "Enter Gemini API Key",
-      value=secret_key,
-      type="password",
-      help="Get an API key from Google AI Studio (aistudio.google.com)",
-  )
-  st.markdown("---")
-  st.info("💡 You can upload individual image files or a single .zip file.")
+    st.header("🔑 Settings")
+    secret_key = (
+        st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
+    )
+    api_key = st.text_input(
+        "Enter Gemini API Key",
+        value=secret_key,
+        type="password",
+        help="Get an API key from Google AI Studio (aistudio.google.com)",
+    )
+    st.markdown("---")
+    st.info("💡 You can upload individual image files or a single .zip file.")
 
 # ---------------------------------------------------------
-# Pure JSON Schema
+# Schema Definition
 # ---------------------------------------------------------
 LEDGER_SCHEMA = {
     "type": "OBJECT",
@@ -88,29 +88,26 @@ LEDGER_SCHEMA = {
 
 
 def preprocess_image(img: Image.Image) -> bytes:
-  """Fixes phone orientation and resizes image so API calls are fast and reliable."""
-  # Fix phone camera rotation
-  try:
-    img = ImageOps.exif_transpose(img)
-  except Exception:
-    pass
+    try:
+        img = ImageOps.exif_transpose(img)
+    except Exception:
+        pass
 
-  if img.mode in ("RGBA", "P"):
-    img = img.convert("RGB")
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
 
-  # Downscale if wider than 2000px (keeps crystal-clear quality for numbers, prevents timeouts)
-  max_dimension = 2048
-  if max(img.size) > max_dimension:
-    img.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+    max_dim = 2048
+    if max(img.size) > max_dim:
+        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
 
-  buf = io.BytesIO()
-  img.save(buf, format="JPEG", quality=85)
-  return buf.getvalue()
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return buf.getvalue()
 
 
-import time
-
-def extract_ledger_from_image(img: Image.Image, client: genai.Client, max_retries: int = 5):
+def extract_ledger_from_image(
+    img: Image.Image, client: genai.Client, max_retries: int = 5
+):
     prompt = """
     You are an expert church auditor transcribing an official Church Monthly Subscription and Other Fund Register.
     Extract every single row accurately.
@@ -135,199 +132,205 @@ def extract_ledger_from_image(img: Image.Image, client: genai.Client, max_retrie
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=[
-                    types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
-                    prompt
+                    types.Part.from_bytes(
+                        data=img_bytes, mime_type="image/jpeg"
+                    ),
+                    prompt,
                 ],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    response_schema=LEDGER_SCHEMA
+                    response_schema=LEDGER_SCHEMA,
                 ),
             )
             if response.text:
                 return json.loads(response.text)
         except Exception as e:
             err_str = str(e)
-            
-            # If rate limit exceeded (429) or high demand (503)
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "503" in err_str:
-                # Wait 15 seconds to let the 1-minute quota reset
+            if (
+                "429" in err_str
+                or "RESOURCE_EXHAUSTED" in err_str
+                or "503" in err_str
+            ):
                 wait_time = 15 + (attempt * 5)
                 time.sleep(wait_time)
                 continue
             else:
-                # For non-rate-limit errors, raise immediately
                 raise e
 
-    raise RuntimeError("Failed after multiple attempts due to API quota. Please try again in 1 minute.")
+    raise RuntimeError(
+        "Failed after multiple attempts due to API quota. Please try again in 1"
+        " minute."
+    )
+
 
 def build_workbook(extracted_tables):
-  wb = openpyxl.Workbook()
-  wb.remove(wb.active)  # Remove default blank sheet
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
 
-  headers = [
-      "S.No",
-      "Sub No",
-      "Name",
-      "Month",
-      "Subscription (1)",
-      "Evangelism (2)",
-      "Renovation (3)",
-      "Rural Fund (4)",
-      "Poor Fund (5)",
-      "Bible Society (6)",
-      "Building Fund (7)",
-      "Sunday School (8)",
-      "Youth Fellowship (9)",
-      "Women's Fellowship (10)",
-      "Men's Fellowship (11)",
-      "Hostel Children (12)",
-      "Educational Fund (13)",
-      "Choir Fund (14)",
-      "Alter Decoration H.C. Elements (15)",
-      "Cemetery Maintenance (16)",
-      "Calculated Total",
-      "Written Total",
-      "Audit Status",
-  ]
-
-  header_fill = PatternFill(
-      start_color="1F497D", end_color="1F497D", fill_type="solid"
-  )
-  header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-  discrepancy_fill = PatternFill(
-      start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"
-  )
-  discrepancy_font = Font(name="Calibri", size=11, bold=True, color="C00000")
-  total_fill = PatternFill(
-      start_color="DCE6F1", end_color="DCE6F1", fill_type="solid"
-  )
-  total_font = Font(name="Calibri", size=11, bold=True)
-  thin_border = Border(
-      left=Side(style="thin", color="D9D9D9"),
-      right=Side(style="thin", color="D9D9D9"),
-      top=Side(style="thin", color="D9D9D9"),
-      bottom=Side(style="thin", color="D9D9D9"),
-  )
-  double_border = Border(
-      top=Side(style="thin", color="000000"),
-      bottom=Side(style="double", color="000000"),
-  )
-
-  for table_data in extracted_tables:
-    raw_date = str(table_data.get("register_date") or "Register").strip()
-    tab_name = raw_date.replace("/", "-")
-    for ch in [":", "*", "?", "[", "]", "\\", "/"]:
-      tab_name = tab_name.replace(ch, "")
-    tab_name = tab_name[:28] or "Register"
-
-    orig_name = tab_name
-    counter = 1
-    while tab_name in wb.sheetnames:
-      tab_name = f"{orig_name[:24]}_{counter}"
-      counter += 1
-
-    ws = wb.create_sheet(title=tab_name)
-    ws.append(headers)
-
-    for col_idx in range(1, len(headers) + 1):
-      c = ws.cell(row=1, column=col_idx)
-      c.fill = header_fill
-      c.font = header_font
-      c.alignment = Alignment(
-          horizontal="center", vertical="center", wrap_text=True
-      )
-
-    members = table_data.get("members", [])
-    for r_idx, m in enumerate(members, start=2):
-      calc_formula = f"=SUM(E{r_idx}:T{r_idx})"
-      written = float(m.get("written_total") or 0.0)
-
-      row_vals = [
-          m.get("s_no", r_idx - 1),
-          m.get("sub_no", ""),
-          m.get("name", ""),
-          m.get("month", ""),
-          float(m.get("subscription") or 0.0),
-          float(m.get("evangelism") or 0.0),
-          float(m.get("renovation") or 0.0),
-          float(m.get("rural_fund") or 0.0),
-          float(m.get("poor_fund") or 0.0),
-          float(m.get("bible_society") or 0.0),
-          float(m.get("building_fund") or 0.0),
-          float(m.get("sunday_school") or 0.0),
-          float(m.get("youth_fellowship") or 0.0),
-          float(m.get("womens_fellowship") or 0.0),
-          float(m.get("mens_fellowship") or 0.0),
-          float(m.get("hostel_children") or 0.0),
-          float(m.get("educational_fund") or 0.0),
-          float(m.get("choir_fund") or 0.0),
-          float(m.get("alter_decoration") or 0.0),
-          float(m.get("cemetery_maintenance") or 0.0),
-          calc_formula,
-          written,
-          f'=IF(U{r_idx}=V{r_idx}, "Balanced", "Variance")',
-      ]
-      ws.append(row_vals)
-
-      item_sum = sum(float(x or 0.0) for x in row_vals[4:20])
-
-      for col_idx in range(1, len(headers) + 1):
-        cell = ws.cell(row=r_idx, column=col_idx)
-        cell.border = thin_border
-        if 5 <= col_idx <= 22:
-          cell.number_format = "#,##0"
-
-      if abs(item_sum - written) > 0.01:
-        ws.cell(row=r_idx, column=21).fill = discrepancy_fill
-        ws.cell(row=r_idx, column=22).fill = discrepancy_fill
-        status_cell = ws.cell(row=r_idx, column=23)
-        status_cell.fill = discrepancy_fill
-        status_cell.font = discrepancy_font
-
-    num_m = len(members)
-    tot_row_idx = num_m + 2
-    tot_row = ["Total", "", "", ""]
-    cols_letters = [
-        "E",
-        "F",
-        "G",
-        "H",
-        "I",
-        "J",
-        "K",
-        "L",
-        "M",
-        "N",
-        "O",
-        "P",
-        "Q",
-        "R",
-        "S",
-        "T",
-        "U",
-        "V",
+    headers = [
+        "S.No",
+        "Sub No",
+        "Name",
+        "Month",
+        "Subscription (1)",
+        "Evangelism (2)",
+        "Renovation (3)",
+        "Rural Fund (4)",
+        "Poor Fund (5)",
+        "Bible Society (6)",
+        "Building Fund (7)",
+        "Sunday School (8)",
+        "Youth Fellowship (9)",
+        "Women's Fellowship (10)",
+        "Men's Fellowship (11)",
+        "Hostel Children (12)",
+        "Educational Fund (13)",
+        "Choir Fund (14)",
+        "Alter Decoration H.C. Elements (15)",
+        "Cemetery Maintenance (16)",
+        "Calculated Total",
+        "Written Total",
+        "Audit Status",
     ]
-    for letter in cols_letters:
-      tot_row.append(f"=SUM({letter}2:{letter}{num_m+1})")
-    tot_row.append("")
-    ws.append(tot_row)
 
-    for col_idx in range(1, len(headers) + 1):
-      c = ws.cell(row=tot_row_idx, column=col_idx)
-      c.fill = total_fill
-      c.font = total_font
-      c.border = double_border
-      if 5 <= col_idx <= 22:
-        c.number_format = "#,##0"
+    header_fill = PatternFill(
+        start_color="1F497D", end_color="1F497D", fill_type="solid"
+    )
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    discrepancy_fill = PatternFill(
+        start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"
+    )
+    discrepancy_font = Font(name="Calibri", size=11, bold=True, color="C00000")
+    total_fill = PatternFill(
+        start_color="DCE6F1", end_color="DCE6F1", fill_type="solid"
+    )
+    total_font = Font(name="Calibri", size=11, bold=True)
+    thin_border = Border(
+        left=Side(style="thin", color="D9D9D9"),
+        right=Side(style="thin", color="D9D9D9"),
+        top=Side(style="thin", color="D9D9D9"),
+        bottom=Side(style="thin", color="D9D9D9"),
+    )
+    double_border = Border(
+        top=Side(style="thin", color="000000"),
+        bottom=Side(style="double", color="000000"),
+    )
 
-  output = io.BytesIO()
-  wb.save(output)
-  output.seek(0)
-  return output
+    for table_data in extracted_tables:
+        raw_date = str(table_data.get("register_date") or "Register").strip()
+        tab_name = raw_date.replace("/", "-")
+        for ch in [":", "*", "?", "[", "]", "\\", "/"]:
+            tab_name = tab_name.replace(ch, "")
+        tab_name = tab_name[:28] or "Register"
+
+        orig_name = tab_name
+        counter = 1
+        while tab_name in wb.sheetnames:
+            tab_name = f"{orig_name[:24]}_{counter}"
+            counter += 1
+
+        ws = wb.create_sheet(title=tab_name)
+        ws.append(headers)
+
+        for col_idx in range(1, len(headers) + 1):
+            c = ws.cell(row=1, column=col_idx)
+            c.fill = header_fill
+            c.font = header_font
+            c.alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
+            )
+
+        members = table_data.get("members", [])
+        for r_idx, m in enumerate(members, start=2):
+            calc_formula = f"=SUM(E{r_idx}:T{r_idx})"
+            written = float(m.get("written_total") or 0.0)
+
+            row_vals = [
+                m.get("s_no", r_idx - 1),
+                m.get("sub_no", ""),
+                m.get("name", ""),
+                m.get("month", ""),
+                float(m.get("subscription") or 0.0),
+                float(m.get("evangelism") or 0.0),
+                float(m.get("renovation") or 0.0),
+                float(m.get("rural_fund") or 0.0),
+                float(m.get("poor_fund") or 0.0),
+                float(m.get("bible_society") or 0.0),
+                float(m.get("building_fund") or 0.0),
+                float(m.get("sunday_school") or 0.0),
+                float(m.get("youth_fellowship") or 0.0),
+                float(m.get("womens_fellowship") or 0.0),
+                float(m.get("mens_fellowship") or 0.0),
+                float(m.get("hostel_children") or 0.0),
+                float(m.get("educational_fund") or 0.0),
+                float(m.get("choir_fund") or 0.0),
+                float(m.get("alter_decoration") or 0.0),
+                float(m.get("cemetery_maintenance") or 0.0),
+                calc_formula,
+                written,
+                f'=IF(U{r_idx}=V{r_idx}, "Balanced", "Variance")',
+            ]
+            ws.append(row_vals)
+
+            item_sum = sum(float(x or 0.0) for x in row_vals[4:20])
+
+            for col_idx in range(1, len(headers) + 1):
+                cell = ws.cell(row=r_idx, column=col_idx)
+                cell.border = thin_border
+                if 5 <= col_idx <= 22:
+                    cell.number_format = "#,##0"
+
+            if abs(item_sum - written) > 0.01:
+                ws.cell(row=r_idx, column=21).fill = discrepancy_fill
+                ws.cell(row=r_idx, column=22).fill = discrepancy_fill
+                status_cell = ws.cell(row=r_idx, column=23)
+                status_cell.fill = discrepancy_fill
+                status_cell.font = discrepancy_font
+
+        num_m = len(members)
+        tot_row_idx = num_m + 2
+        tot_row = ["Total", "", "", ""]
+        cols_letters = [
+            "E",
+            "F",
+            "G",
+            "H",
+            "I",
+            "J",
+            "K",
+            "L",
+            "M",
+            "N",
+            "O",
+            "P",
+            "Q",
+            "R",
+            "S",
+            "T",
+            "U",
+            "V",
+        ]
+        for letter in cols_letters:
+            tot_row.append(f"=SUM({letter}2:{letter}{num_m+1})")
+        tot_row.append("")
+        ws.append(tot_row)
+
+        for col_idx in range(1, len(headers) + 1):
+            c = ws.cell(row=tot_row_idx, column=col_idx)
+            c.fill = total_fill
+            c.font = total_font
+            c.border = double_border
+            if 5 <= col_idx <= 22:
+                c.number_format = "#,##0"
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
 
 
 # ---------------------------------------------------------
-# UI Handling
+# UI Upload & Processing Block
 # ---------------------------------------------------------
 uploaded_files = st.file_uploader(
     "Drop Ledger Images (.jpg, .png) or a .zip file here",
@@ -336,84 +339,90 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-  images_to_process = []
-  for f in uploaded_files:
-    if f.name.lower().endswith(".zip"):
-      with zipfile.ZipFile(f) as z:
-        for z_name in sorted(z.namelist()):
-          if z_name.lower().endswith(
-              (".jpg", ".jpeg", ".png")
-          ) and not z_name.startswith("__MACOSX"):
-            img_data = z.read(z_name)
-            images_to_process.append(
-                (z_name, Image.open(io.BytesIO(img_data)))
+    images_to_process = []
+    for f in uploaded_files:
+        if f.name.lower().endswith(".zip"):
+            with zipfile.ZipFile(f) as z:
+                for z_name in sorted(z.namelist()):
+                    if z_name.lower().endswith(
+                        (".jpg", ".jpeg", ".png")
+                    ) and not z_name.startswith("__MACOSX"):
+                        img_data = z.read(z_name)
+                        images_to_process.append(
+                            (z_name, Image.open(io.BytesIO(img_data)))
+                        )
+        else:
+            images_to_process.append((f.name, Image.open(f)))
+
+    st.success(
+        f"Loaded **{len(images_to_process)} ledger pages** ready for"
+        " processing."
+    )
+
+    if st.button("🚀 Process & Generate Excel"):
+        if not api_key:
+            st.error(
+                "Please enter your Gemini API Key in the left sidebar to"
+                " proceed."
             )
-    else:
-      images_to_process.append((f.name, Image.open(f)))
+        else:
+            client = genai.Client(api_key=api_key)
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            extracted_results = []
+            failed_pages = []
 
-  st.success(
-      f"Loaded **{len(images_to_process)} ledger pages** ready for processing."
-  )
+            total_images = len(images_to_process)
 
- if st.button("🚀 Process & Generate Excel"):
-    if not api_key:
-      st.error(
-          "Please enter your Gemini API Key in the left sidebar to proceed."
-      )
-    else:
-      client = genai.Client(api_key=api_key)
-      progress_bar = st.progress(0)
-      status_text = st.empty()
-      extracted_results = []
-      failed_pages = []
+            for idx, (filename, img) in enumerate(images_to_process):
+                status_text.text(
+                    f"Transcribing page {idx+1} of {total_images}: {filename}..."
+                )
+                try:
+                    res = extract_ledger_from_image(img, client)
+                    if res and res.get("members"):
+                        extracted_results.append(res)
+                        st.write(
+                            f"✔️ **{filename}**: Found date"
+                            f" `{res.get('register_date')}` with"
+                            f" {len(res.get('members'))} rows."
+                        )
+                    else:
+                        failed_pages.append((filename, "No rows extracted"))
+                except Exception as e:
+                    failed_pages.append((filename, str(e)))
+                    st.error(f"❌ Failed on {filename}: {str(e)}")
 
-      total_images = len(images_to_process)
+                progress_bar.progress((idx + 1) / total_images)
 
-      for idx, (filename, img) in enumerate(images_to_process):
-        status_text.text(
-            f"Transcribing page {idx+1} of {total_images}: {filename}..."
-        )
-        try:
-          res = extract_ledger_from_image(img, client)
-          if res and res.get("members"):
-            extracted_results.append(res)
-            st.write(
-                f"✔️ **{filename}**: Found date"
-                f" `{res.get('register_date')}` with"
-                f" {len(res.get('members'))} rows."
-            )
-          else:
-            failed_pages.append((filename, "No rows extracted"))
-        except Exception as e:
-          failed_pages.append((filename, str(e)))
-          st.error(f"❌ Failed on {filename}: {str(e)}")
+                # Free Tier quota pacing: wait 13s between pages
+                if idx < total_images - 1:
+                    status_text.text(
+                        f"⏳ Waiting 13s for quota reset before page {idx+2} of"
+                        f" {total_images}..."
+                    )
+                    time.sleep(13)
 
-        progress_bar.progress((idx + 1) / total_images)
-
-        # Pause between images (only if there are remaining images)
-        if idx < total_images - 1:
-          status_text.text(
-              f"⏳ Waiting 13s for quota reset before page {idx+2} of"
-              f" {total_images}..."
-          )
-          time.sleep(13)
-
-      if extracted_results:
-        status_text.text("Building Excel workbook with dynamic formulas...")
-        excel_bytes = build_workbook(extracted_results)
-        st.balloons()
-        st.success(
-            f"✅ Processed {len(extracted_results)} pages successfully into"
-            " Excel!"
-        )
-        st.download_button(
-            label="📥 Download Completed Church Register (.xlsx)",
-            data=excel_bytes,
-            file_name="CSI_St_Pauls_Church_Register_Audited.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-      else:
-        st.error(
-            "⚠️ No pages were successfully extracted. Check the error messages"
-            " above."
-        )
+            if extracted_results:
+                status_text.text(
+                    "Building Excel workbook with dynamic formulas..."
+                )
+                excel_bytes = build_workbook(extracted_results)
+                st.balloons()
+                st.success(
+                    f"✅ Processed {len(extracted_results)} pages successfully"
+                    " into Excel!"
+                )
+                st.download_button(
+                    label="📥 Download Completed Church Register (.xlsx)",
+                    data=excel_bytes,
+                    file_name="CSI_St_Pauls_Church_Register_Audited.xlsx",
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    ),
+                )
+            else:
+                st.error(
+                    "⚠️ No pages were successfully extracted. Check the error"
+                    " messages above."
+                )
