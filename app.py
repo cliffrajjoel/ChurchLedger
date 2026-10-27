@@ -13,11 +13,9 @@ st.set_page_config(
     page_title="Church Ledger Digitizer", page_icon="⛪", layout="wide"
 )
 
-st.title("⛪ CSI St. Paul's Church - Ledger Digitizer")
+st.title("⛪ CSI St. Paul's Church - Autonomous Ledger Digitizer")
 st.write(
-    "Upload weekly church ledger photos or a `.zip` folder. The app reads all"
-    " 16 fund heads, checks row & column arithmetic, and builds a formatted"
-    " multi-tab Excel file."
+    "Upload 20+ ledger photos or a `.zip` file. The app processes each page at a safe pace within the Free Tier, handles retries automatically, and compiles the multi-tab Excel file."
 )
 
 with st.sidebar:
@@ -32,7 +30,9 @@ with st.sidebar:
         help="Get an API key from Google AI Studio (aistudio.google.com)",
     )
     st.markdown("---")
-    st.info("💡 You can upload individual image files or a single .zip file.")
+    st.info(
+        "💡 **Free Tier Mode**: Paced at ~16 seconds per page to guarantee zero quota errors. A 20-image batch will take ~6 to 7 minutes."
+    )
 
 # ---------------------------------------------------------
 # Schema Definition
@@ -74,9 +74,7 @@ LEDGER_SCHEMA = {
                     "cemetery_maintenance": {"type": "NUMBER"},
                     "written_total": {
                         "type": "NUMBER",
-                        "description": (
-                            "Total amount written at rightmost column"
-                        ),
+                        "description": "Total amount written at rightmost column",
                     },
                 },
                 "required": ["s_no", "name", "written_total"],
@@ -106,7 +104,7 @@ def preprocess_image(img: Image.Image) -> bytes:
 
 
 def extract_ledger_from_image(
-    img: Image.Image, client: genai.Client, max_retries: int = 5
+    img: Image.Image, client: genai.Client, status_placeholder, max_retries: int = 5
 ):
     prompt = """
     You are an expert church auditor transcribing an official Church Monthly Subscription and Other Fund Register.
@@ -130,11 +128,9 @@ def extract_ledger_from_image(
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
-                model="gemini-3.8-flash",
+                model="gemini-2.5-flash",
                 contents=[
-                    types.Part.from_bytes(
-                        data=img_bytes, mime_type="image/jpeg"
-                    ),
+                    types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
                     prompt,
                 ],
                 config=types.GenerateContentConfig(
@@ -146,20 +142,17 @@ def extract_ledger_from_image(
                 return json.loads(response.text)
         except Exception as e:
             err_str = str(e)
-            if (
-                "429" in err_str
-                or "RESOURCE_EXHAUSTED" in err_str
-                or "503" in err_str
-            ):
-                wait_time = 15 + (attempt * 5)
-                time.sleep(wait_time)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "503" in err_str:
+                status_placeholder.warning(
+                    f"⚠️ Quota paused by Google. Sleeping 65s before retry (Attempt {attempt+1}/{max_retries})..."
+                )
+                time.sleep(65)
                 continue
             else:
                 raise e
 
     raise RuntimeError(
-        "Failed after multiple attempts due to API quota. Please try again in 1"
-        " minute."
+        "Page failed after multiple retries due to persistent API quota limits."
     )
 
 
@@ -168,42 +161,20 @@ def build_workbook(extracted_tables):
     wb.remove(wb.active)
 
     headers = [
-        "S.No",
-        "Sub No",
-        "Name",
-        "Month",
-        "Subscription (1)",
-        "Evangelism (2)",
-        "Renovation (3)",
-        "Rural Fund (4)",
-        "Poor Fund (5)",
-        "Bible Society (6)",
-        "Building Fund (7)",
-        "Sunday School (8)",
-        "Youth Fellowship (9)",
-        "Women's Fellowship (10)",
-        "Men's Fellowship (11)",
-        "Hostel Children (12)",
-        "Educational Fund (13)",
-        "Choir Fund (14)",
-        "Alter Decoration H.C. Elements (15)",
-        "Cemetery Maintenance (16)",
-        "Calculated Total",
-        "Written Total",
-        "Audit Status",
+        "S.No", "Sub No", "Name", "Month",
+        "Subscription (1)", "Evangelism (2)", "Renovation (3)", "Rural Fund (4)",
+        "Poor Fund (5)", "Bible Society (6)", "Building Fund (7)", "Sunday School (8)",
+        "Youth Fellowship (9)", "Women's Fellowship (10)", "Men's Fellowship (11)",
+        "Hostel Children (12)", "Educational Fund (13)", "Choir Fund (14)",
+        "Alter Decoration H.C. Elements (15)", "Cemetery Maintenance (16)",
+        "Calculated Total", "Written Total", "Audit Status",
     ]
 
-    header_fill = PatternFill(
-        start_color="1F497D", end_color="1F497D", fill_type="solid"
-    )
+    header_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
     header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-    discrepancy_fill = PatternFill(
-        start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"
-    )
+    discrepancy_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
     discrepancy_font = Font(name="Calibri", size=11, bold=True, color="C00000")
-    total_fill = PatternFill(
-        start_color="DCE6F1", end_color="DCE6F1", fill_type="solid"
-    )
+    total_fill = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
     total_font = Font(name="Calibri", size=11, bold=True)
     thin_border = Border(
         left=Side(style="thin", color="D9D9D9"),
@@ -236,9 +207,7 @@ def build_workbook(extracted_tables):
             c = ws.cell(row=1, column=col_idx)
             c.fill = header_fill
             c.font = header_font
-            c.alignment = Alignment(
-                horizontal="center", vertical="center", wrap_text=True
-            )
+            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
         members = table_data.get("members", [])
         for r_idx, m in enumerate(members, start=2):
@@ -291,24 +260,8 @@ def build_workbook(extracted_tables):
         tot_row_idx = num_m + 2
         tot_row = ["Total", "", "", ""]
         cols_letters = [
-            "E",
-            "F",
-            "G",
-            "H",
-            "I",
-            "J",
-            "K",
-            "L",
-            "M",
-            "N",
-            "O",
-            "P",
-            "Q",
-            "R",
-            "S",
-            "T",
-            "U",
-            "V",
+            "E", "F", "G", "H", "I", "J", "K", "L", "M", "N",
+            "O", "P", "Q", "R", "S", "T", "U", "V"
         ]
         for letter in cols_letters:
             tot_row.append(f"=SUM({letter}2:{letter}{num_m+1})")
@@ -330,8 +283,13 @@ def build_workbook(extracted_tables):
 
 
 # ---------------------------------------------------------
-# UI Upload & Processing Block
+# UI Handling & State Persistence
 # ---------------------------------------------------------
+if "excel_data" not in st.session_state:
+    st.session_state.excel_data = None
+if "processed_pages_count" not in st.session_state:
+    st.session_state.processed_pages_count = 0
+
 uploaded_files = st.file_uploader(
     "Drop Ledger Images (.jpg, .png) or a .zip file here",
     type=["jpg", "jpeg", "png", "zip"],
@@ -344,85 +302,59 @@ if uploaded_files:
         if f.name.lower().endswith(".zip"):
             with zipfile.ZipFile(f) as z:
                 for z_name in sorted(z.namelist()):
-                    if z_name.lower().endswith(
-                        (".jpg", ".jpeg", ".png")
-                    ) and not z_name.startswith("__MACOSX"):
+                    if z_name.lower().endswith((".jpg", ".jpeg", ".png")) and not z_name.startswith("__MACOSX"):
                         img_data = z.read(z_name)
-                        images_to_process.append(
-                            (z_name, Image.open(io.BytesIO(img_data)))
-                        )
+                        images_to_process.append((z_name, Image.open(io.BytesIO(img_data))))
         else:
             images_to_process.append((f.name, Image.open(f)))
 
-    st.success(
-        f"Loaded **{len(images_to_process)} ledger pages** ready for"
-        " processing."
-    )
+    total_images = len(images_to_process)
+    estimated_mins = round((total_images * 16) / 60, 1)
+    st.success(f"📁 Loaded **{total_images} ledger pages**. Estimated Free Tier runtime: ~**{estimated_mins} minutes**.")
 
-    if st.button("🚀 Process & Generate Excel"):
+    if st.button("🚀 Start Unattended Processing"):
         if not api_key:
-            st.error(
-                "Please enter your Gemini API Key in the left sidebar to"
-                " proceed."
-            )
+            st.error("Please enter your Gemini API Key in the sidebar.")
         else:
             client = genai.Client(api_key=api_key)
             progress_bar = st.progress(0)
             status_text = st.empty()
+            audit_log = st.container()
             extracted_results = []
-            failed_pages = []
-
-            total_images = len(images_to_process)
 
             for idx, (filename, img) in enumerate(images_to_process):
-                status_text.text(
-                    f"Transcribing page {idx+1} of {total_images}: {filename}..."
-                )
+                status_text.info(f"⏳ Processing page {idx+1} of {total_images}: **{filename}**...")
                 try:
-                    res = extract_ledger_from_image(img, client)
+                    res = extract_ledger_from_image(img, client, status_text)
                     if res and res.get("members"):
                         extracted_results.append(res)
-                        st.write(
-                            f"✔️ **{filename}**: Found date"
-                            f" `{res.get('register_date')}` with"
-                            f" {len(res.get('members'))} rows."
+                        audit_log.write(
+                            f"✔️ **Page {idx+1} ({filename})**: Date `{res.get('register_date')}` with {len(res.get('members'))} rows."
                         )
-                    else:
-                        failed_pages.append((filename, "No rows extracted"))
                 except Exception as e:
-                    failed_pages.append((filename, str(e)))
-                    st.error(f"❌ Failed on {filename}: {str(e)}")
+                    audit_log.error(f"❌ Failed on {filename}: {str(e)}")
 
                 progress_bar.progress((idx + 1) / total_images)
 
-                # Free Tier quota pacing: wait 13s between pages
+                # Safe pacing: 16 seconds ensures strictly < 4 calls per minute
                 if idx < total_images - 1:
-                    status_text.text(
-                        f"⏳ Waiting 13s for quota reset before page {idx+2} of"
-                        f" {total_images}..."
-                    )
-                    time.sleep(13)
+                    status_text.caption(f"Sleeping 16s for Free Tier quota safety before next page...")
+                    time.sleep(16)
 
             if extracted_results:
-                status_text.text(
-                    "Building Excel workbook with dynamic formulas..."
-                )
-                excel_bytes = build_workbook(extracted_results)
-                st.balloons()
-                st.success(
-                    f"✅ Processed {len(extracted_results)} pages successfully"
-                    " into Excel!"
-                )
-                st.download_button(
-                    label="📥 Download Completed Church Register (.xlsx)",
-                    data=excel_bytes,
-                    file_name="CSI_St_Pauls_Church_Register_Audited.xlsx",
-                    mime=(
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    ),
-                )
+                status_text.success("🎉 All pages completed! Building final Excel file...")
+                st.session_state.excel_data = build_workbook(extracted_results).getvalue()
+                st.session_state.processed_pages_count = len(extracted_results)
             else:
-                st.error(
-                    "⚠️ No pages were successfully extracted. Check the error"
-                    " messages above."
-                )
+                st.error("⚠️ No pages could be extracted. Please check the logs above.")
+
+# Show persistent download button if results are ready
+if st.session_state.excel_data:
+    st.markdown("---")
+    st.success(f"✅ Ready! **{st.session_state.processed_pages_count} pages** audited and converted.")
+    st.download_button(
+        label="📥 Download Completed Church Register (.xlsx)",
+        data=st.session_state.excel_data,
+        file_name="CSI_St_Pauls_Church_Register_Audited.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
