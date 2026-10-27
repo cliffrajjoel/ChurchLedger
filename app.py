@@ -108,8 +108,10 @@ def preprocess_image(img: Image.Image) -> bytes:
   return buf.getvalue()
 
 
-def extract_ledger_from_image(img: Image.Image, client: genai.Client):
-  prompt = """
+import time
+
+def extract_ledger_from_image(img: Image.Image, client: genai.Client, max_retries: int = 5):
+    prompt = """
     You are an expert church auditor transcribing an official Church Monthly Subscription and Other Fund Register.
     Extract every single row accurately.
     
@@ -126,25 +128,37 @@ def extract_ledger_from_image(img: Image.Image, client: genai.Client):
     3. Capture the exact written total at the end of each row.
     4. Capture the date of the register accurately (e.g. 05-04-2026).
     """
-  img_bytes = preprocess_image(img)
+    img_bytes = preprocess_image(img)
 
-  response = client.models.generate_content(
-      model="gemini-3.8-flash",
-      contents=[
-          types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
-          prompt,
-      ],
-      config=types.GenerateContentConfig(
-          response_mime_type="application/json", response_schema=LEDGER_SCHEMA
-      ),
-  )
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
+                    prompt
+                ],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=LEDGER_SCHEMA
+                ),
+            )
+            if response.text:
+                return json.loads(response.text)
+        except Exception as e:
+            err_str = str(e)
+            
+            # If rate limit exceeded (429) or high demand (503)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "503" in err_str:
+                # Wait 15 seconds to let the 1-minute quota reset
+                wait_time = 15 + (attempt * 5)
+                time.sleep(wait_time)
+                continue
+            else:
+                # For non-rate-limit errors, raise immediately
+                raise e
 
-  if not response.text:
-    raise ValueError("Empty response received from Gemini.")
-
-  data = json.loads(response.text)
-  return data
-
+    raise RuntimeError("Failed after multiple attempts due to API quota. Please try again in 1 minute.")
 
 def build_workbook(extracted_tables):
   wb = openpyxl.Workbook()
@@ -341,7 +355,7 @@ if uploaded_files:
       f"Loaded **{len(images_to_process)} ledger pages** ready for processing."
   )
 
-  if st.button("🚀 Process & Generate Excel"):
+ if st.button("🚀 Process & Generate Excel"):
     if not api_key:
       st.error(
           "Please enter your Gemini API Key in the left sidebar to proceed."
@@ -353,10 +367,11 @@ if uploaded_files:
       extracted_results = []
       failed_pages = []
 
+      total_images = len(images_to_process)
+
       for idx, (filename, img) in enumerate(images_to_process):
         status_text.text(
-            f"Transcribing page {idx+1} of {len(images_to_process)}:"
-            f" {filename}..."
+            f"Transcribing page {idx+1} of {total_images}: {filename}..."
         )
         try:
           res = extract_ledger_from_image(img, client)
@@ -365,15 +380,23 @@ if uploaded_files:
             st.write(
                 f"✔️ **{filename}**: Found date"
                 f" `{res.get('register_date')}` with"
-                f" {len(res.get('members'))} member rows."
+                f" {len(res.get('members'))} rows."
             )
           else:
-            failed_pages.append((filename, "No member rows extracted"))
+            failed_pages.append((filename, "No rows extracted"))
         except Exception as e:
           failed_pages.append((filename, str(e)))
           st.error(f"❌ Failed on {filename}: {str(e)}")
 
-        progress_bar.progress((idx + 1) / len(images_to_process))
+        progress_bar.progress((idx + 1) / total_images)
+
+        # Pause between images (only if there are remaining images)
+        if idx < total_images - 1:
+          status_text.text(
+              f"⏳ Waiting 13s for quota reset before page {idx+2} of"
+              f" {total_images}..."
+          )
+          time.sleep(13)
 
       if extracted_results:
         status_text.text("Building Excel workbook with dynamic formulas...")
